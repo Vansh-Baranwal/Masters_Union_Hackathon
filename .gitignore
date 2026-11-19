@@ -1,0 +1,69 @@
+# ── Python ────────────────────────────────────────────────────────────────── #
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# ── Virtual environments ───────────────────────────────────────────────────── #
+.venv/
+venv/
+env/
+ENV/
+
+# ── Environment / secrets ──────────────────────────────────────────────────── #
+.env
+*.env
+!.env.example
+
+# ── Database ──────────────────────────────────────────────────────────────── #
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Raw images (may contain PII) ──────────────────────────────────────────── #
+pratibimb/data/raw_images/
+data/raw_images/
+
+# ── Eval results (generated, not committed) ───────────────────────────────── #
+pratibimb/eval/results/
+eval/results/
+
+# ── Logs ──────────────────────────────────────────────────────────────────── #
+*.log
+logs/
+
+# ── Pytest / coverage ─────────────────────────────────────────────────────── #
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# ── Mypy / ruff / type checkers ───────────────────────────────────────────── #
+.mypy_cache/
+.ruff_cache/
+
+# ── IDE ───────────────────────────────────────────────────────────────────── #
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Streamlit ─────────────────────────────────────────────────────────────── #
+.streamlit/secrets.toml
+
+# ── Node (if any frontend tooling is added later) ─────────────────────────── #
+node_modules/
+
+# ── Temporary / generated ─────────────────────────────────────────────────── #
+*.tmp
+*.bak
+*.orig
