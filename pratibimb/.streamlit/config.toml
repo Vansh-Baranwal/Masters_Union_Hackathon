@@ -1,0 +1,31 @@
+[server]
+port = 8501
+headless = false
+runOnSave = true
+# Allow the dashboard to call localhost:8000 (the API)
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"
+serverPort = 8501
+
+[theme]
+base = "dark"
+primaryColor = "#7C3AED"          # purple — matches the Pratibimb brand
+backgroundColor = "#0F0F0F"
+secondaryBackgroundColor = "#1A1A2E"
+textColor = "#F0F0F0"
+font = "sans serif"
+
+[runner]
+# Re-run the app automatically when you save a file during development
+fastReruns = true
+
+[logger]
+level = "warning"
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"

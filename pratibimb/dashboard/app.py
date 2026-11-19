@@ -1,331 +1,558 @@
 """
 Pratibimb coordinator dashboard — Streamlit app.
 
-Pages:
-  1. Roster        — all travellers + evidence counts per person
-  2. Inbox         — exceptions only (needs_review / unreadable)
-  3. Trail         — full evidence/interpretation/relationship/decision history
-  4. Decisions     — approve / reject / request proof / link manually
-  5. Claims export — download CSV or XLSX
-  6. Audit         — hash-chain integrity check + tamper demo
+Pages (via sidebar navigation):
+  🏠 Overview   — trip metrics at a glance
+  👥 Roster     — all travellers + join code
+  📥 Inbox      — exceptions only, with reasons
+  🔍 Trail      — full evidence history for one item
+  ✅ Decisions  — approve / reject / request proof
+  📤 Export     — download CSV or XLSX
+  🔒 Audit      — hash-chain integrity check
 
-Run with:
-    streamlit run dashboard/app.py
+Run:
+    python -m streamlit run dashboard/app.py
 """
 from __future__ import annotations
 
-import asyncio
-import io
-import json
+import time
 from typing import Optional
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import requests
 import streamlit as st
 
 API_BASE = "http://localhost:8000"
+REFRESH_INTERVAL = 30   # seconds for auto-refresh on live pages
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────── #
+# ─── Page config (must be first Streamlit call) ───────────────────────────── #
+st.set_page_config(
+    page_title="Pratibimb",
+    page_icon="🪞",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        "Get Help": None,
+        "Report a bug": None,
+        "About": "Pratibimb — Every screenshot gets an owner, a trail and an honest label.",
+    },
+)
 
+
+# ─── Custom CSS ───────────────────────────────────────────────────────────── #
+st.markdown("""
+<style>
+/* Tighten sidebar */
+[data-testid="stSidebar"] { min-width: 240px; max-width: 280px; }
+
+/* Metric cards */
+[data-testid="stMetric"] {
+    background: #1A1A2E;
+    border: 1px solid #2D2D4E;
+    border-radius: 10px;
+    padding: 12px 16px;
+}
+[data-testid="stMetricValue"] { font-size: 2rem !important; }
+
+/* Verdict badges */
+.badge-green  { background:#1A7A4A; color:#fff; padding:2px 10px; border-radius:12px; font-size:0.8rem; }
+.badge-blue   { background:#1B5E9E; color:#fff; padding:2px 10px; border-radius:12px; font-size:0.8rem; }
+.badge-orange { background:#C84B00; color:#fff; padding:2px 10px; border-radius:12px; font-size:0.8rem; }
+.badge-red    { background:#B71C1C; color:#fff; padding:2px 10px; border-radius:12px; font-size:0.8rem; }
+
+/* Code blocks */
+code { font-size: 0.85rem !important; }
+
+/* Expander header */
+[data-testid="stExpander"] summary { font-weight: 600; }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─── API helper ───────────────────────────────────────────────────────────── #
 def api(method: str, path: str, **kwargs):
-    url = f"{API_BASE}{path}"
-    resp = getattr(requests, method)(url, **kwargs)
-    if resp.status_code >= 400:
-        st.error(f"API error {resp.status_code}: {resp.text[:300]}")
+    try:
+        resp = getattr(requests, method)(f"{API_BASE}{path}", timeout=10, **kwargs)
+        if resp.status_code >= 400:
+            st.error(f"API {resp.status_code}: {resp.text[:200]}")
+            return None
+        ct = resp.headers.get("content-type", "")
+        return resp.json() if "application/json" in ct else resp
+    except requests.exceptions.ConnectionError:
+        st.error("Cannot reach API server. Make sure `python main.py --mode api` is running.")
         return None
-    return resp.json() if resp.headers.get("content-type", "").startswith("application/json") else resp
 
 
-def _verdict_badge(verdict: str) -> str:
-    colors = {
+def _badge(verdict: str) -> str:
+    css = {
+        "corroborated": "badge-green",
+        "extracted":    "badge-blue",
+        "needs_review": "badge-orange",
+        "unreadable":   "badge-red",
+    }
+    emoji = {
         "corroborated": "🟢",
         "extracted":    "🔵",
         "needs_review": "🟠",
         "unreadable":   "🔴",
     }
-    return f"{colors.get(verdict, '⚪')} {verdict}"
+    cls = css.get(verdict, "badge-blue")
+    ico = emoji.get(verdict, "⚪")
+    return f'<span class="{cls}">{ico} {verdict}</span>'
 
 
-def _rel_badge(rel_type: Optional[str]) -> str:
-    if not rel_type:
-        return "—"
-    icons = {"EXACT": "🔗", "INFERRED": "〰️", "MANUAL": "✋", "UNMATCHED": "❓"}
-    return f"{icons.get(rel_type, '')} {rel_type}"
+def _rel_icon(rel_type: Optional[str]) -> str:
+    return {"EXACT": "🔗 EXACT", "INFERRED": "〰️ INFERRED",
+            "MANUAL": "✋ MANUAL", "UNMATCHED": "❓ UNMATCHED"}.get(rel_type or "", "—")
 
 
-# ─── Page: Roster ─────────────────────────────────────────────────────────── #
+# ─── Sidebar ──────────────────────────────────────────────────────────────── #
+with st.sidebar:
+    st.markdown("## 🪞 Pratibimb")
+    st.caption("Coordinator Dashboard")
+    st.divider()
 
-def page_roster(trip_id: str):
-    st.header("Roster")
-    summary = api("get", f"/trips/{trip_id}/summary")
+    # Trip selector
+    st.markdown("**Active Trip**")
+    trip_id_input = st.text_input(
+        "Trip ID", value=st.session_state.get("trip_id", ""),
+        placeholder="Paste trip ID here", label_visibility="collapsed"
+    )
+    if trip_id_input:
+        st.session_state["trip_id"] = trip_id_input.strip()
+
+    # Quick create
+    with st.expander("➕ Create new trip"):
+        with st.form("create_trip", clear_on_submit=True):
+            trip_name = st.text_input("Trip name", placeholder="Namma Metro Offsite")
+            coord_id  = st.text_input("Your ID", placeholder="coord-vansh")
+            if st.form_submit_button("Create", use_container_width=True):
+                if trip_name and coord_id:
+                    r = api("post", "/trips", json={"name": trip_name, "coordinator_id": coord_id})
+                    if r:
+                        st.session_state["trip_id"] = r["trip_id"]
+                        st.success(f"Trip ID: `{r['trip_id'][:8]}…`")
+                        st.info(f"Join code: **{r['join_code']}**")
+                        st.rerun()
+
+    st.divider()
+
+    # Page navigation
+    page = st.radio(
+        "Navigate",
+        ["🏠 Overview", "👥 Roster", "📥 Inbox", "🔍 Trail", "✅ Decisions", "📤 Export", "🔒 Audit"],
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+    # API health indicator
+    health = api("get", "/health")
+    if health and health.get("status") == "ok":
+        st.success("API ✅ online", icon="🟢")
+    else:
+        st.error("API offline", icon="🔴")
+
+
+tid = st.session_state.get("trip_id", "")
+
+
+# ─── Page: Overview ───────────────────────────────────────────────────────── #
+def page_overview():
+    st.title("🏠 Overview")
+    if not tid:
+        st.info("Create or select a trip in the sidebar to get started.")
+        st.markdown("""
+        **Quick start:**
+        1. Expand **➕ Create new trip** in the sidebar
+        2. Give it a name and your coordinator ID → click Create
+        3. Share the **join code** with your travellers
+        4. Travellers send `/join CODE` to the Telegram bot, then forward their screenshots
+        """)
+        return
+
+    summary = api("get", f"/trips/{tid}/summary")
     if not summary:
         return
 
+    st.markdown(f"### {summary['name']}")
+    st.caption(f"Trip ID: `{summary['trip_id']}` · Status: **{summary['status'].upper()}**")
+
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Travellers", summary["traveller_count"])
-    col2.metric("Screenshots filed", summary["evidence_count"])
-    col3.metric("Open cases", summary["open_case_count"])
-    col4.metric("Trip status", summary["status"].upper())
+    col1.metric("👥 Travellers",       summary["traveller_count"])
+    col2.metric("📸 Screenshots filed", summary["evidence_count"])
+    col3.metric("⚠️ Open cases",       summary["open_case_count"],
+                delta=f"-{summary['open_case_count']}" if summary["open_case_count"] == 0 else None,
+                delta_color="inverse")
+    col4.metric("🔑 Join code",        summary.get("join_code") or "—")
+
+    if summary["open_case_count"] > 0:
+        st.warning(f"**{summary['open_case_count']} item(s) need your attention.** Go to 📥 Inbox.")
 
     st.divider()
-    st.subheader("Join code")
-    st.code(summary.get("join_code") or "—", language=None)
-    if st.button("Refresh join code"):
-        result = api("post", f"/trips/{trip_id}/join-code")
-        if result:
-            st.success(f"New join code: **{result['join_code']}**")
+
+    # Sparkline: submissions over time (requires evidence data from export)
+    exp = api("get", f"/export/claims?trip_id={tid}&fmt=json")
+    if exp and exp.get("rows"):
+        df = pd.DataFrame(exp["rows"])
+        if "received_at" in df.columns:
+            df["received_at"] = pd.to_datetime(df["received_at"], errors="coerce")
+            df["hour"] = df["received_at"].dt.floor("h")
+            counts = df.groupby("hour").size().reset_index(name="count")
+            fig = px.bar(counts, x="hour", y="count",
+                         title="Submissions over time",
+                         color_discrete_sequence=["#7C3AED"])
+            fig.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=0, r=0, t=40, b=0),
+                xaxis_title="", yaxis_title="Screenshots",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Verdict breakdown donut
+        if "verdict" in df.columns:
+            vc = df["verdict"].value_counts().reset_index()
+            vc.columns = ["verdict", "count"]
+            fig2 = px.pie(
+                vc, names="verdict", values="count", hole=0.55,
+                color="verdict",
+                color_discrete_map={
+                    "corroborated": "#1A7A4A", "extracted": "#1B5E9E",
+                    "needs_review": "#C84B00", "unreadable": "#B71C1C",
+                },
+                title="Evidence levels",
+            )
+            fig2.update_layout(
+                plot_bgcolor="rgba(0,0,0,0)",
+                paper_bgcolor="rgba(0,0,0,0)",
+                margin=dict(l=0, r=0, t=40, b=0),
+                showlegend=True,
+            )
+            col_a, col_b = st.columns([1, 1])
+            col_a.plotly_chart(fig2, use_container_width=True)
+
+            # Screenshot type breakdown
+            if "screenshot_type" in df.columns:
+                tc = df["screenshot_type"].value_counts().reset_index()
+                tc.columns = ["type", "count"]
+                fig3 = px.bar(tc, x="count", y="type", orientation="h",
+                              title="Screenshot types",
+                              color_discrete_sequence=["#7C3AED"])
+                fig3.update_layout(
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    xaxis_title="Count", yaxis_title="",
+                )
+                col_b.plotly_chart(fig3, use_container_width=True)
+
+
+# ─── Page: Roster ─────────────────────────────────────────────────────────── #
+def page_roster():
+    st.title("👥 Roster")
+    if not tid:
+        st.warning("Select a trip in the sidebar.")
+        return
+
+    summary = api("get", f"/trips/{tid}/summary")
+    if not summary:
+        return
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("Join code")
+        st.code(summary.get("join_code") or "—", language=None)
+        st.caption("Travellers send `/join CODE` to the Telegram bot.")
+    with col2:
+        if st.button("🔄 Refresh join code", use_container_width=True):
+            r = api("post", f"/trips/{tid}/join-code")
+            if r:
+                st.success(f"New code: **{r['join_code']}**")
+                st.rerun()
 
     st.divider()
-    st.subheader("Travellers")
     travellers = summary.get("travellers", [])
-    if travellers:
-        df = pd.DataFrame(travellers)[["display_name", "sender_id", "language_pref", "joined_at"]]
-        df.columns = ["Name", "Sender ID", "Language", "Joined at"]
-        st.dataframe(df, use_container_width=True)
-    else:
-        st.info("No travellers have joined yet.")
+    if not travellers:
+        st.info("No travellers have joined yet. Share the join code above.")
+        return
+
+    df = pd.DataFrame(travellers)
+    df = df.rename(columns={
+        "display_name": "Name", "sender_id": "Sender ID",
+        "language_pref": "Language", "joined_at": "Joined at",
+    })
+    df["Joined at"] = pd.to_datetime(df["Joined at"], errors="coerce").dt.strftime("%d %b %Y %H:%M")
+    st.dataframe(df[["Name","Sender ID","Language","Joined at"]], use_container_width=True, hide_index=True)
 
 
 # ─── Page: Inbox ──────────────────────────────────────────────────────────── #
+def page_inbox():
+    st.title("📥 Exceptions Inbox")
+    if not tid:
+        st.warning("Select a trip in the sidebar.")
+        return
 
-def page_inbox(trip_id: str):
-    st.header("Exceptions Inbox")
-    data = api("get", f"/trips/{trip_id}/inbox")
+    # Auto-refresh toggle
+    col_h, col_r = st.columns([4, 1])
+    with col_r:
+        auto = st.toggle("Auto-refresh", value=False)
+
+    data = api("get", f"/trips/{tid}/inbox")
     if not data:
         return
 
     exceptions = data.get("exceptions", [])
-    total = data.get("total_items", 0)
-    st.caption(f"{len(exceptions)} exception(s) out of {total} total submissions")
+    total      = data.get("total_items", 0)
+
+    col1, col2 = st.columns(2)
+    col1.metric("Total submissions", total)
+    col2.metric("Exceptions", len(exceptions),
+                delta=len(exceptions) if len(exceptions) > 0 else None,
+                delta_color="inverse")
 
     if not exceptions:
-        st.success("No exceptions — all submissions are corroborated or recorded.")
+        st.success("✅ All clear — no exceptions.")
+        if auto:
+            time.sleep(REFRESH_INTERVAL)
+            st.rerun()
         return
-
-    # Summary donut
-    verdict_counts = pd.Series([e["verdict"] for e in exceptions]).value_counts().reset_index()
-    verdict_counts.columns = ["verdict", "count"]
-    fig = px.pie(verdict_counts, names="verdict", values="count",
-                 color_discrete_map={
-                     "needs_review": "#C84B00", "unreadable": "#B71C1C",
-                     "corroborated": "#1A7A4A", "extracted": "#424242",
-                 },
-                 hole=0.5, title="Exception breakdown")
-    st.plotly_chart(fig, use_container_width=True)
 
     st.divider()
     for exc in exceptions:
-        with st.expander(
-            f"{_verdict_badge(exc['verdict'])}  ·  "
-            f"{exc['screenshot_type']}  ·  "
-            f"{exc['received_at'][:19]}  ·  sender: {exc['sender_id'][:12]}"
-        ):
+        verdict = exc["verdict"]
+        icon = {"corroborated":"🟢","extracted":"🔵","needs_review":"🟠","unreadable":"🔴"}.get(verdict,"⚪")
+        header = (
+            f"{icon} **{exc['screenshot_type']}** · "
+            f"{exc['received_at'][:16].replace('T',' ')} · "
+            f"sender `{exc['sender_id'][:10]}`"
+        )
+        with st.expander(header, expanded=(verdict == "needs_review")):
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"**Verdict**  \n{_badge(verdict)}", unsafe_allow_html=True)
+            c2.markdown(f"**Confidence**  \n`{exc['type_confidence']:.0%}`")
+            c3.markdown(f"**Link**  \n`{_rel_icon(exc.get('relationship_type'))}`")
+
+            st.markdown(f"**Evidence level:** `{exc['overall_level']}`")
+            if exc["machine_states"]:
+                st.markdown("**States:** " + " · ".join(f"`{s}`" for s in exc["machine_states"]))
+            st.markdown(f"**Reason:** {exc['reason']}")
+
             col_a, col_b = st.columns(2)
-            col_a.write(f"**Confidence:** {exc['type_confidence']:.0%}")
-            col_a.write(f"**Link:** {_rel_badge(exc.get('relationship_type'))}")
-            col_b.write(f"**Evidence level:** {exc['overall_level']}")
-            col_b.write(f"**States:** {', '.join(exc['machine_states']) or '—'}")
-            st.write(f"**Reason:** {exc['reason']}")
             if exc.get("needs_challenge"):
-                if st.button("Send evidence challenge", key=f"ch_{exc['evidence_id']}"):
+                if col_a.button("💬 Send challenge", key=f"ch_{exc['evidence_id']}"):
                     r = api("post", f"/challenge/{exc['evidence_id']}")
                     if r and r.get("challenge_sent"):
-                        st.success("Challenge message queued.")
-            st.caption(f"Ref: {exc['evidence_id']}")
+                        st.success("Challenge sent to traveller.")
+            if col_b.button("🔍 View trail", key=f"trail_{exc['evidence_id']}"):
+                st.session_state["trail_id"] = exc["evidence_id"]
+                st.info(f"Go to 🔍 Trail page and search for `{exc['evidence_id'][:8]}`")
+
+            st.caption(f"Ref: `{exc['evidence_id']}`")
+
+    if auto:
+        time.sleep(REFRESH_INTERVAL)
+        st.rerun()
 
 
 # ─── Page: Trail ──────────────────────────────────────────────────────────── #
-
 def page_trail():
-    st.header("Evidence Trail")
-    evidence_id = st.text_input("Evidence ID (or first 8 chars):").strip()
+    st.title("🔍 Evidence Trail")
+
+    default = st.session_state.get("trail_id", "")
+    evidence_id = st.text_input(
+        "Evidence ID", value=default,
+        placeholder="Paste full evidence ID (from inbox or reply card ref)"
+    ).strip()
+
     if not evidence_id:
-        st.info("Enter an evidence ID to view its full trail.")
+        st.info("Paste an evidence ID above to view its full trail.")
         return
 
-    # Accept short refs (prefix search not supported by API — tell user to use full ID)
     data = api("get", f"/records/{evidence_id}/trail")
     if not data:
         return
 
-    st.subheader("Evidence")
-    st.json(data["evidence"])
+    # Evidence card
+    ev = data["evidence"]
+    st.subheader("📋 Evidence record")
+    cols = st.columns(4)
+    cols[0].markdown(f"**Channel**  \n`{ev.get('channel','—')}`")
+    cols[1].markdown(f"**Received**  \n`{ev.get('received_at','')[:16].replace('T',' ')}`")
+    cols[2].markdown(f"**Status**  \n`{ev.get('status','—')}`")
+    cols[3].markdown(f"**SHA-256**  \n`{ev.get('sha256','')[:16]}…`")
 
-    st.subheader("Interpretations")
+    st.divider()
+
+    # Interpretations
+    st.subheader("🧠 Interpretations")
     for i, interp in enumerate(data["interpretations"]):
-        label = f"[{i+1}] {interp['screenshot_type']}  conf={interp['type_confidence']:.0%}  {interp['created_at'][:19]}"
-        with st.expander(label):
-            st.json(interp)
+        label = (f"[{i+1}] **{interp['screenshot_type']}** · "
+                 f"conf `{interp['type_confidence']:.0%}` · "
+                 f"{interp['created_at'][:16].replace('T',' ')}")
+        with st.expander(label, expanded=(i == len(data["interpretations"]) - 1)):
+            fields = interp.get("fields", {})
+            fc     = interp.get("field_confidence", {})
+            if fields:
+                rows = [
+                    {"Field": k, "Value": str(v) if v is not None else "—",
+                     "Confidence": f"{fc.get(k, 0):.0%}"}
+                    for k, v in fields.items() if v is not None
+                ]
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.caption(f"Model: `{interp.get('model_version','—')}` · Producer: `{interp.get('producer','—')}`")
 
-    st.subheader("Relationships")
+    st.divider()
+
+    # Relationships
+    st.subheader("🔗 Relationships")
     if data["relationships"]:
-        rel_df = pd.DataFrame([
-            {
-                "type": r["type"],
-                "basis": ", ".join(r["basis"]),
-                "score": r["score"],
-                "reason": r["plain_reason"],
-                "created_by": r["created_by"],
-            }
-            for r in data["relationships"]
-        ])
-        st.dataframe(rel_df, use_container_width=True)
+        rel_df = pd.DataFrame([{
+            "Type":       r["type"],
+            "Basis":      ", ".join(r["basis"]),
+            "Score":      f"{r['score']:.2f}",
+            "Reason":     r["plain_reason"],
+            "Created by": r["created_by"],
+        } for r in data["relationships"]])
+        st.dataframe(rel_df, use_container_width=True, hide_index=True)
     else:
         st.info("No relationships recorded yet.")
 
-    st.subheader("Decisions")
+    st.divider()
+
+    # Decisions
+    st.subheader("✅ Decisions")
     if data["decisions"]:
-        dec_df = pd.DataFrame([
-            {
-                "action": d["action"],
-                "decided_by": d["decided_by"],
-                "reason": d["reason"],
-                "created_at": d["created_at"][:19],
-            }
-            for d in data["decisions"]
-        ])
-        st.dataframe(dec_df, use_container_width=True)
+        dec_df = pd.DataFrame([{
+            "Action":     d["action"],
+            "By":         d["decided_by"],
+            "Reason":     d["reason"] or "—",
+            "At":         d["created_at"][:16].replace("T"," "),
+        } for d in data["decisions"]])
+        st.dataframe(dec_df, use_container_width=True, hide_index=True)
     else:
-        st.info("No coordinator decisions recorded yet.")
+        st.info("No decisions recorded yet.")
 
 
 # ─── Page: Decisions ──────────────────────────────────────────────────────── #
-
 def page_decisions():
-    st.header("Record a Decision")
-    with st.form("decision_form"):
-        subject_ref = st.text_input("Evidence ID *")
-        action = st.selectbox("Action *", ["approved", "rejected", "proof_requested", "linked_manually"])
-        decided_by = st.text_input("Coordinator ID *")
-        reason = st.text_area("Reason")
-        link_to = st.text_input("Link to evidence ID (only for 'linked_manually')", value="")
-        submitted = st.form_submit_button("Submit decision")
+    st.title("✅ Record a Decision")
+    st.caption("Every decision is timestamped, signed and hash-chained. It cannot be deleted.")
+
+    with st.form("decision_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        subject_ref = col1.text_input("Evidence ID *", placeholder="Full UUID from trail/inbox")
+        decided_by  = col2.text_input("Coordinator ID *", placeholder="Your ID")
+        action = st.selectbox("Action *", [
+            "approved", "rejected", "proof_requested", "linked_manually"
+        ], format_func=lambda x: {
+            "approved":        "✅ Approved — accept this claim",
+            "rejected":        "❌ Rejected — dismiss this claim",
+            "proof_requested": "🔁 Proof requested — ask for more evidence",
+            "linked_manually": "🔗 Link manually — connect to another evidence item",
+        }[x])
+        reason  = st.text_area("Reason", placeholder="Brief note visible in the audit trail")
+        link_to = st.text_input(
+            "Link to evidence ID (linked_manually only)",
+            placeholder="Leave blank for other actions"
+        )
+        submitted = st.form_submit_button("Submit decision", use_container_width=True, type="primary")
 
     if submitted:
         if not subject_ref or not decided_by:
             st.error("Evidence ID and Coordinator ID are required.")
-            return
-        payload = {
-            "subject_ref": subject_ref,
-            "action": action,
-            "decided_by": decided_by,
-            "reason": reason,
-        }
-        if action == "linked_manually" and link_to:
-            payload["link_to_evidence_id"] = link_to
-        result = api("post", "/decisions", json=payload)
-        if result:
-            st.success(f"Decision recorded: **{result['dec_id'][:12]}…** — {action}")
+        else:
+            payload = {"subject_ref": subject_ref.strip(), "action": action,
+                       "decided_by": decided_by.strip(), "reason": reason}
+            if action == "linked_manually" and link_to.strip():
+                payload["link_to_evidence_id"] = link_to.strip()
+            r = api("post", "/decisions", json=payload)
+            if r:
+                st.success(f"Decision `{r['dec_id'][:12]}…` recorded — **{action}**")
 
 
 # ─── Page: Export ─────────────────────────────────────────────────────────── #
+def page_export():
+    st.title("📤 Claims Export")
+    if not tid:
+        st.warning("Select a trip in the sidebar.")
+        return
 
-def page_export(trip_id: str):
-    st.header("Claims Export")
-    fmt = st.radio("Format", ["json", "csv", "xlsx"], horizontal=True)
+    fmt = st.radio("Format", ["json", "csv", "xlsx"], horizontal=True,
+                   captions=["Preview in browser", "Spreadsheet (comma)", "Excel workbook"])
+    st.divider()
 
-    if st.button("Generate export"):
+    if st.button("Generate", type="primary"):
         if fmt == "json":
-            data = api("get", f"/export/claims?trip_id={trip_id}&fmt=json")
+            data = api("get", f"/export/claims?trip_id={tid}&fmt=json")
             if data:
-                st.write(f"**{data['total']} rows**")
-                st.dataframe(pd.DataFrame(data["rows"]), use_container_width=True)
+                rows = data.get("rows", [])
+                st.metric("Rows", len(rows))
+                if rows:
+                    df = pd.DataFrame(rows)
+                    # Highlight verdict column
+                    st.dataframe(df, use_container_width=True, hide_index=True)
         else:
-            resp = requests.get(f"{API_BASE}/export/claims?trip_id={trip_id}&fmt={fmt}")
+            resp = requests.get(f"{API_BASE}/export/claims?trip_id={tid}&fmt={fmt}", timeout=30)
             if resp.status_code == 200:
-                mime = "text/csv" if fmt == "csv" else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime = ("text/csv" if fmt == "csv"
+                        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 st.download_button(
-                    label=f"Download claims.{fmt}",
+                    f"⬇️ Download claims.{fmt}",
                     data=resp.content,
-                    file_name=f"claims_{trip_id}.{fmt}",
+                    file_name=f"claims_{tid[:8]}.{fmt}",
                     mime=mime,
+                    use_container_width=True,
+                    type="primary",
                 )
             else:
                 st.error(f"Export failed: {resp.status_code}")
 
 
 # ─── Page: Audit ──────────────────────────────────────────────────────────── #
-
 def page_audit():
-    st.header("Audit — Hash Chain Integrity")
-    st.write(
-        "Walks every record in the audit chain in sequence order "
-        "and re-derives each hash. A broken link means a row was edited after it was written."
+    st.title("🔒 Audit — Hash Chain")
+    st.markdown(
+        "Every record write is chained: `record_hash = SHA-256(record_json + prev_hash)`. "
+        "Any row edited after it was written breaks the chain at that exact sequence number."
     )
-    if st.button("Run audit check"):
-        result = api("get", "/audit/verify")
-        if result:
-            if result["ok"]:
-                st.success(f"✅ Chain intact — {result['total']} records verified.")
+    st.divider()
+
+    if st.button("▶ Run integrity check", type="primary"):
+        with st.spinner("Verifying chain…"):
+            r = api("get", "/audit/verify")
+        if r:
+            if r["ok"]:
+                st.success(f"✅ Chain intact — **{r['total']}** records verified.")
+                st.balloons()
             else:
                 st.error(
-                    f"❌ Chain broken at sequence #{result['broken_at_seq']} "
-                    f"(out of {result['total']} records). "
-                    "A record was modified after it was written."
+                    f"❌ Chain broken at sequence **#{r['broken_at_seq']}** "
+                    f"(out of {r['total']} records). "
+                    "A row was modified after it was written."
                 )
 
-
-# ─── Sidebar + main ───────────────────────────────────────────────────────── #
-
-def main():
-    st.set_page_config(
-        page_title="Pratibimb — Coordinator Dashboard",
-        page_icon="🪞",
-        layout="wide",
-    )
-    st.title("🪞 Pratibimb")
-    st.caption("Every screenshot gets an owner, a trail and an honest label.")
-
-    with st.sidebar:
-        st.header("Trip")
-        trip_id = st.text_input("Trip ID", value=st.session_state.get("trip_id", ""))
-        if trip_id:
-            st.session_state["trip_id"] = trip_id
-
-        st.divider()
-        st.subheader("Create new trip")
-        with st.form("create_trip"):
-            trip_name = st.text_input("Trip name")
-            coord_id = st.text_input("Your coordinator ID")
-            create = st.form_submit_button("Create")
-        if create and trip_name and coord_id:
-            result = api("post", "/trips", json={"name": trip_name, "coordinator_id": coord_id})
-            if result:
-                st.session_state["trip_id"] = result["trip_id"]
-                st.success(f"Created! ID: `{result['trip_id']}`\nJoin code: `{result['join_code']}`")
-
-        st.divider()
-        page = st.radio(
-            "View",
-            ["Roster", "Inbox", "Trail", "Decisions", "Export", "Audit"],
-        )
-
-    tid = st.session_state.get("trip_id", "")
-
-    if page == "Roster":
-        if not tid:
-            st.warning("Enter or create a Trip ID in the sidebar first.")
-        else:
-            page_roster(tid)
-    elif page == "Inbox":
-        if not tid:
-            st.warning("Enter a Trip ID in the sidebar first.")
-        else:
-            page_inbox(tid)
-    elif page == "Trail":
-        page_trail()
-    elif page == "Decisions":
-        page_decisions()
-    elif page == "Export":
-        if not tid:
-            st.warning("Enter a Trip ID in the sidebar first.")
-        else:
-            page_export(tid)
-    elif page == "Audit":
-        page_audit()
+    st.divider()
+    st.markdown("#### How it works")
+    st.markdown("""
+    ```
+    record_hash[0] = SHA256(record_json[0] + "000...0")   ← genesis
+    record_hash[1] = SHA256(record_json[1] + record_hash[0])
+    record_hash[N] = SHA256(record_json[N] + record_hash[N-1])
+    ```
+    If any record is changed, its hash changes, which breaks every subsequent link.
+    The verifier detects this at the first broken link and reports the exact sequence number.
+    """)
 
 
-if __name__ == "__main__":
-    main()
+# ─── Router ───────────────────────────────────────────────────────────────── #
+if   page == "🏠 Overview":  page_overview()
+elif page == "👥 Roster":    page_roster()
+elif page == "📥 Inbox":     page_inbox()
+elif page == "🔍 Trail":     page_trail()
+elif page == "✅ Decisions": page_decisions()
+elif page == "📤 Export":    page_export()
+elif page == "🔒 Audit":     page_audit()
