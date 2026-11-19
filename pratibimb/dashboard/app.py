@@ -27,6 +27,124 @@ import streamlit as st
 API_BASE = st.secrets.get("api", {}).get("base_url", "http://localhost:8000")
 REFRESH_INTERVAL = 30   # seconds for auto-refresh on live pages
 
+
+# ─── Braille terrain background ───────────────────────────────────────────── #
+def _inject_braille_background():
+    """
+    Injects the BrailleTerrainBackground canvas animation into the Streamlit
+    page as a fixed full-screen backdrop. Ported from BrailleTerrainBackground.tsx.
+    """
+    import streamlit.components.v1 as components
+    components.html("""
+<style>
+  #braille-bg {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 0;
+    pointer-events: none;
+    background: #0a0b0d;
+  }
+  #braille-bg canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    filter: blur(2px);
+  }
+</style>
+<div id="braille-bg"><canvas id="braille-canvas" aria-hidden="true"></canvas></div>
+<script>
+(function () {
+  const DOT_BITS  = [0x01, 0x02, 0x04, 0x40, 0x08, 0x10, 0x20, 0x80];
+  const DOT_ORDER = [0.06, 0.56, 0.31, 0.81, 0.43, 0.93, 0.18, 0.68];
+  const COLOR      = "#c3cad4";
+  const CELL_SIZE  = 10;
+  const SCALE      = 0.06;
+  const SPEED      = 1;
+  const OPACITY    = 0.85;
+  const TIERS      = [{min:0.1,alpha:0.3},{min:0.4,alpha:0.62},{min:0.66,alpha:1}];
+
+  function field(x, y, t) {
+    return (
+      Math.sin(0.9*x + 0.25*t) * Math.cos(0.7*y - 0.18*t) * 0.5 +
+      0.3 * Math.sin(1.7*x - 1.1*y + 0.22*t) +
+      Math.sin(0.35*x + 0.3*t) * Math.cos(0.45*y + 0.2*t) * 0.55 +
+      0.2 * Math.sin(3.1*x + 0.12*t) * Math.cos(2.7*y - 0.1*t)
+    );
+  }
+
+  const canvas = document.getElementById("braille-canvas");
+  const ctx    = canvas.getContext("2d", {alpha: true});
+  const cw = CELL_SIZE, ch = cw * 1.6;
+  const zoom = SCALE, rate = SPEED;
+  let width = 0, height = 0, elapsed = 0, previous = 0, frame = 0, fn = 0;
+  const buckets = TIERS.map(() => []);
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    ctx.font = `400 ${cw*1.25}px ui-monospace,monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    buckets.forEach(b => b.length = 0);
+    const cols = Math.ceil(width / cw) + 1;
+    const rows = Math.ceil(height / ch) + 1;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        let bits = 0, sum = 0;
+        for (let d = 0; d < 8; d++) {
+          const sx = c + (d < 4 ? 0.25 : 0.75);
+          const sy = r + ((d % 4) + 0.5) / 4;
+          const raw = (field(sx*zoom*2, sy*zoom*2*1.6, elapsed) + 1.55) / 3.1;
+          const v = raw < 0.5 ? 2*raw*raw : 1 - 2*(1-raw)*(1-raw);
+          sum += v;
+          if (v > DOT_ORDER[d]) bits |= DOT_BITS[d];
+        }
+        if (!bits) bits = 0x02;
+        const mean = sum / 8;
+        for (let i = TIERS.length - 1; i >= 0; i--) {
+          if (mean >= TIERS[i].min) {
+            buckets[i].push(String.fromCharCode(0x2800 + bits), c*cw + cw/2, r*ch + ch/2);
+            break;
+          }
+        }
+      }
+    }
+    buckets.forEach((bucket, i) => {
+      ctx.globalAlpha = OPACITY * TIERS[i].alpha;
+      ctx.fillStyle = COLOR;
+      for (let j = 0; j < bucket.length; j += 3)
+        ctx.fillText(bucket[j], bucket[j+1], bucket[j+2]);
+    });
+    ctx.globalAlpha = 1;
+  }
+
+  function resize() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    width  = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width  = Math.max(1, Math.floor(width  * dpr));
+    canvas.height = Math.max(1, Math.floor(height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+
+  function tick(now) {
+    elapsed += Math.min((now - previous) / 1000, 0.1) * rate;
+    previous = now;
+    if (++fn % 2 === 0) draw();
+    frame = requestAnimationFrame(tick);
+  }
+
+  window.addEventListener("resize", resize);
+  resize();
+  previous = performance.now();
+  frame = requestAnimationFrame(tick);
+})();
+</script>
+""", height=0)  # height=0 — the canvas is fixed-position, takes no layout space
+
 # ─── Coordinator login gate ───────────────────────────────────────────────── #
 def _login_wall():
     """Simple coordinator login — just an ID + trip ID pair. No password server needed."""
@@ -79,21 +197,39 @@ st.set_page_config(
     },
 )
 
+# Inject braille terrain background
+_inject_braille_background()
+
 
 # ─── Custom CSS ───────────────────────────────────────────────────────────── #
 st.markdown("""
 <style>
-/* Tighten sidebar */
-[data-testid="stSidebar"] { min-width: 240px; max-width: 280px; }
+/* Make Streamlit's own background transparent so braille canvas shows through */
+.stApp { background: transparent !important; }
+[data-testid="stAppViewContainer"] { background: transparent !important; }
+[data-testid="stHeader"] { background: transparent !important; }
+[data-testid="stSidebar"] {
+    background: rgba(10, 11, 13, 0.82) !important;
+    backdrop-filter: blur(12px);
+    min-width: 240px; max-width: 280px;
+}
 
 /* Metric cards */
 [data-testid="stMetric"] {
-    background: #1A1A2E;
+    background: rgba(26, 26, 46, 0.75);
     border: 1px solid #2D2D4E;
     border-radius: 10px;
     padding: 12px 16px;
+    backdrop-filter: blur(8px);
 }
 [data-testid="stMetricValue"] { font-size: 2rem !important; }
+
+/* Main content area — slightly frosted */
+[data-testid="stMainBlockContainer"] {
+    background: rgba(10, 11, 13, 0.55) !important;
+    backdrop-filter: blur(6px);
+    border-radius: 12px;
+}
 
 /* Verdict badges */
 .badge-green  { background:#1A7A4A; color:#fff; padding:2px 10px; border-radius:12px; font-size:0.8rem; }
