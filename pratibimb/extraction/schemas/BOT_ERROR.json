@@ -1,37 +1,14 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "BotErrorSchema",
-  "description": "Schema for extracting Metro bot booking error/failure messages",
   "type": "object",
+  "description": "Metro bot error or booking failure message screenshot",
   "properties": {
-    "order_id": {
-      "type": ["string", "null"],
-      "description": "Order or session identifier if mentioned"
-    },
-    "amount": {
-      "type": ["number", "null"],
-      "description": "Attempted transaction amount"
-    },
-    "currency": {
-      "type": "string",
-      "default": "INR"
-    },
-    "timestamp": {
-      "type": ["string", "null"],
-      "description": "Message timestamp"
-    },
-    "status_text": {
-      "type": ["string", "null"],
-      "description": "Bot error explanation, e.g. 'Booking failed. Refund will be processed within 7 working days.'"
-    },
-    "app_name": {
-      "type": ["string", "null"],
-      "description": "Chat app, e.g. WhatsApp"
-    },
-    "language_detected": {
-      "type": ["string", "null"],
-      "description": "Language: en, kn, hi"
-    }
+    "timestamp":            { "type": "string",  "description": "Message date and time if visible" },
+    "order_id":             { "type": "string",  "description": "Order or booking ID mentioned in the error" },
+    "status_text":          { "type": "string",  "description": "Full error or status message text" },
+    "error_code":           { "type": "string",  "description": "Error code if shown" },
+    "refund_timeline":      { "type": "string",  "description": "Refund timeline mentioned, e.g. '7 working days'" },
+    "app_name":             { "type": "string",  "description": "Channel where error appeared, e.g. 'WhatsApp', 'Namma Metro App'" },
+    "language_detected":    { "type": "string",  "description": "BCP-47 language code" }
   },
   "required": []
 }

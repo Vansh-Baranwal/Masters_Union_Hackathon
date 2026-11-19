@@ -1,25 +1,16 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "OtherSchema",
-  "description": "Schema for extracting unclassified or generic screenshots",
   "type": "object",
+  "description": "Unclassified screenshot — extract whatever fields are visible",
   "properties": {
-    "amount": {
-      "type": ["number", "null"]
-    },
-    "currency": {
-      "type": "string",
-      "default": "INR"
-    },
-    "timestamp": {
-      "type": ["string", "null"]
-    },
-    "status_text": {
-      "type": ["string", "null"]
-    },
-    "language_detected": {
-      "type": ["string", "null"]
-    }
+    "amount":               { "type": "number",  "description": "Any monetary amount visible" },
+    "currency":             { "type": "string",  "description": "Currency code if identifiable" },
+    "timestamp":            { "type": "string",  "description": "Any date or time visible" },
+    "utr":                  { "type": "string",  "description": "Any reference or transaction ID visible" },
+    "order_id":             { "type": "string",  "description": "Any order or booking ID visible" },
+    "ticket_id":            { "type": "string",  "description": "Any ticket ID visible" },
+    "status_text":          { "type": "string",  "description": "Any status or message text" },
+    "payer_name_masked":    { "type": "string",  "description": "Any partial name visible" },
+    "language_detected":    { "type": "string",  "description": "BCP-47 language code" }
   },
   "required": []
 }

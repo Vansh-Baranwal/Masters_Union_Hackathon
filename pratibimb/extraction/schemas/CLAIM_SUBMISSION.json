@@ -1,61 +1,17 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "ClaimSubmissionSchema",
-  "description": "Schema for extracting reimbursement claim forms or submission screenshots",
   "type": "object",
+  "description": "Reimbursement claim or expense submission screenshot",
   "properties": {
-    "amount": {
-      "type": ["number", "null"],
-      "description": "Claimed reimbursement amount"
-    },
-    "currency": {
-      "type": "string",
-      "default": "INR"
-    },
-    "timestamp": {
-      "type": ["string", "null"],
-      "description": "Claim date or journey date"
-    },
-    "ticket_id": {
-      "type": ["string", "null"],
-      "description": "Attached ticket number"
-    },
-    "order_id": {
-      "type": ["string", "null"],
-      "description": "Claim ID or booking ref"
-    },
-    "origin_station": {
-      "type": ["string", "null"],
-      "description": "Origin station"
-    },
-    "destination_station": {
-      "type": ["string", "null"],
-      "description": "Destination station"
-    },
-    "fare": {
-      "type": ["number", "null"],
-      "description": "Base fare"
-    },
-    "payer_name_masked": {
-      "type": ["string", "null"],
-      "description": "Employee / submitter name"
-    },
-    "payee_name": {
-      "type": ["string", "null"],
-      "description": "Reimbursement recipient or transit operator"
-    },
-    "app_name": {
-      "type": ["string", "null"],
-      "description": "Claim portal or app"
-    },
-    "status_text": {
-      "type": ["string", "null"],
-      "description": "Claim submission status"
-    },
-    "language_detected": {
-      "type": ["string", "null"],
-      "description": "Language of claim"
-    }
+    "amount":               { "type": "number",  "description": "Claimed amount in INR" },
+    "currency":             { "type": "string",  "description": "Currency code, default INR" },
+    "timestamp":            { "type": "string",  "description": "Journey or submission date" },
+    "ticket_id":            { "type": "string",  "description": "Ticket reference being claimed" },
+    "order_id":             { "type": "string",  "description": "Order ID on the claim form" },
+    "origin_station":       { "type": "string",  "description": "Journey origin station" },
+    "destination_station":  { "type": "string",  "description": "Journey destination station" },
+    "payer_name_masked":    { "type": "string",  "description": "Employee or claimant name (partial)" },
+    "status_text":          { "type": "string",  "description": "Claim status if shown" },
+    "language_detected":    { "type": "string",  "description": "BCP-47 language code" }
   },
   "required": []
 }

@@ -1,53 +1,19 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "RefundNoticeSchema",
-  "description": "Schema for extracting refund confirmation messages or bank refund credits",
   "type": "object",
+  "description": "Genuine refund notice — bank SMS, app notification, or BMRCL message",
   "properties": {
-    "amount": {
-      "type": ["number", "null"],
-      "description": "Refunded amount"
-    },
-    "currency": {
-      "type": "string",
-      "default": "INR"
-    },
-    "timestamp": {
-      "type": ["string", "null"],
-      "description": "Refund processed timestamp"
-    },
-    "utr": {
-      "type": ["string", "null"],
-      "description": "Refund UTR or original reference"
-    },
-    "order_id": {
-      "type": ["string", "null"],
-      "description": "Original order ID or ticket ID"
-    },
-    "ticket_id": {
-      "type": ["string", "null"],
-      "description": "Associated ticket ID if mentioned"
-    },
-    "payee_name": {
-      "type": ["string", "null"],
-      "description": "Refund originator, e.g. BMRCL"
-    },
-    "bank_name": {
-      "type": ["string", "null"],
-      "description": "Bank receiving credit"
-    },
-    "app_name": {
-      "type": ["string", "null"],
-      "description": "App notice channel"
-    },
-    "status_text": {
-      "type": ["string", "null"],
-      "description": "Refund status, e.g. 'Refund of ₹40 initiated to source'"
-    },
-    "language_detected": {
-      "type": ["string", "null"],
-      "description": "Language of notice"
-    }
+    "amount":               { "type": "number",  "description": "Refund amount in INR" },
+    "currency":             { "type": "string",  "description": "Currency code, default INR" },
+    "timestamp":            { "type": "string",  "description": "Refund date and time" },
+    "utr":                  { "type": "string",  "description": "Refund transaction reference number" },
+    "order_id":             { "type": "string",  "description": "Original order or booking ID being refunded" },
+    "ticket_id":            { "type": "string",  "description": "Ticket reference being refunded if mentioned" },
+    "payer_name_masked":    { "type": "string",  "description": "Partial account holder name" },
+    "payee_name":           { "type": "string",  "description": "Issuer of refund, e.g. BMRCL or bank name" },
+    "status_text":          { "type": "string",  "description": "Refund status, e.g. 'Initiated', 'Processed', 'Credited'" },
+    "refund_destination":   { "type": "string",  "description": "Where refund is being sent, e.g. 'source account', 'UPI ID'" },
+    "bank_name":            { "type": "string",  "description": "Bank name if shown" },
+    "language_detected":    { "type": "string",  "description": "BCP-47 language code" }
   },
   "required": []
 }

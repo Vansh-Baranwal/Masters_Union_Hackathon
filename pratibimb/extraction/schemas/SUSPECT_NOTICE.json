@@ -1,41 +1,12 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "SuspectNoticeSchema",
-  "description": "Schema for extracting unverified or fraudulent scam notices (e.g. fake refund links, APK download links, KYC threats)",
   "type": "object",
+  "description": "Suspected scam or phishing message — refund/KYC fraud pattern",
   "properties": {
-    "amount": {
-      "type": ["number", "null"],
-      "description": "Lured refund amount or requested fee"
-    },
-    "currency": {
-      "type": "string",
-      "default": "INR"
-    },
-    "timestamp": {
-      "type": ["string", "null"],
-      "description": "Message timestamp"
-    },
-    "order_id": {
-      "type": ["string", "null"],
-      "description": "Fictitious order or claim number"
-    },
-    "payee_name": {
-      "type": ["string", "null"],
-      "description": "Purported sender or impersonated authority"
-    },
-    "status_text": {
-      "type": ["string", "null"],
-      "description": "Suspicious request text (e.g., 'Click here to claim metro refund', 'Install AnyDesk', 'Update KYC')"
-    },
-    "app_name": {
-      "type": ["string", "null"],
-      "description": "Channel of suspicious message"
-    },
-    "language_detected": {
-      "type": ["string", "null"],
-      "description": "Language: en, kn, hi"
-    }
+    "status_text":          { "type": "string",  "description": "Full message text or headline" },
+    "timestamp":            { "type": "string",  "description": "Message date and time if visible" },
+    "suspicious_link":      { "type": "string",  "description": "URL or link present in the message" },
+    "amount":               { "type": "number",  "description": "Amount mentioned in the scam message if any" },
+    "language_detected":    { "type": "string",  "description": "BCP-47 language code" }
   },
   "required": []
 }
