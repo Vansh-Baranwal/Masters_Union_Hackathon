@@ -1,0 +1,38 @@
+{
+  "interp_id": "fix-interp-sus-01",
+  "evidence_id": "fix-ev-sus-01",
+  "producer": "pratibimb-fixture-v1",
+  "model_version": "fixture",
+  "sarvam_job_id": null,
+  "screenshot_type": "SUSPECT_NOTICE",
+  "type_confidence": 0.93,
+  "fields": {
+    "ticket_id": null,
+    "order_id": null,
+    "qr_payload": null,
+    "origin_station": null,
+    "destination_station": null,
+    "fare": null,
+    "amount": 40.0,
+    "currency": "INR",
+    "timestamp": null,
+    "status_text": "Your Metro refund of Rs.40 is pending. Click here to claim: http://bit.ly/metrorefund. Enter OTP to receive.",
+    "payer_name_masked": null,
+    "payee_name": null,
+    "app_name": "WhatsApp",
+    "bank_name": null,
+    "utr": null,
+    "language_detected": "en"
+  },
+  "field_confidence": {
+    "amount": 0.75,
+    "status_text": 0.92,
+    "app_name": 0.80,
+    "language_detected": 0.85
+  },
+  "raw_text_ref": null,
+  "language_detected": "en",
+  "created_at": "2024-03-18T08:10:00+00:00",
+  "supersedes": null,
+  "qr_payload_parseable": null
+}
