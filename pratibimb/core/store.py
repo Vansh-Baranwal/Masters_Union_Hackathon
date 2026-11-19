@@ -151,6 +151,7 @@ class Store:
             type_confidence=rec.type_confidence,
             fields_json=json.dumps(rec.fields.model_dump(), default=str) if rec.fields else None,
             field_confidence=json.dumps(rec.field_confidence) if rec.field_confidence else None,
+            field_sources=json.dumps(rec.field_sources) if rec.field_sources else None,
             raw_text_ref=rec.raw_text_ref,
             language_detected=rec.language_detected,
             created_at=rec.created_at,

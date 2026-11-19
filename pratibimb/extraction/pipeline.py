@@ -139,6 +139,7 @@ async def run_extraction_pipeline(
         type_confidence=type_confidence,
         fields=fields,
         field_confidence=field_confidence,
+        field_sources=field_sources,
         raw_text_ref=raw_text_ref,
         language_detected=language_detected,
         sarvam_job_id=sarvam_job_id,
