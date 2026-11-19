@@ -23,6 +23,7 @@ import sys
 
 import uvicorn
 from dotenv import load_dotenv
+from core.database import init_db
 
 load_dotenv()
 
@@ -51,9 +52,11 @@ async def run_api() -> None:
 
 
 async def run_bot() -> None:
-    from intake.channel import run_bot as _run_bot
+    from intake.channel import run_bot_sync
+    import asyncio as _asyncio
     log.info("Starting Telegram bot…")
-    await _run_bot()
+    loop = _asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_bot_sync)
 
 
 async def run_all() -> None:
@@ -74,7 +77,10 @@ def main() -> None:
         if args.mode == "api":
             asyncio.run(run_api())
         elif args.mode == "bot":
-            asyncio.run(run_bot())
+            # python-telegram-bot manages its own event loop — do NOT use asyncio.run()
+            from intake.channel import run_bot_sync
+            asyncio.run(init_db())
+            run_bot_sync()
         elif args.mode == "all":
             asyncio.run(run_all())
     except KeyboardInterrupt:

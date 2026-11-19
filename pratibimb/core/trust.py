@@ -170,14 +170,23 @@ async def assess_trust(
         machine_states.append(MachineState.CASE_OPENED.value)
 
     # ── Per-attribute evidence levels ─────────────────────────────────────── #
-    for attr in ("amount", "timestamp", "utr", "ticket_id", "order_id"):
+    # For tickets, the key attributes are ticket_id, timestamp, fare.
+    # For payments, they are amount, timestamp, utr.
+    # Use type_confidence as a floor when field-level confidence is 0
+    # (happens when extract returned nothing but parse OCR got the value).
+    type_conf = interp.type_confidence
+    for attr in ("amount", "timestamp", "utr", "ticket_id", "order_id", "fare"):
         val = fields.get(attr)
         conf = fc.get(attr, 0.0)
-        if val is None or conf == 0.0:
+        # If the field has a value but confidence is 0 (extract missed it, parse got it),
+        # use the type confidence as a proxy — the value came from real OCR.
+        if val is not None and conf == 0.0:
+            conf = type_conf
+        if val is None:
             attribute_levels[attr] = EvidenceLevel.NOT_PRESENT.value
         elif has_exact and attr in ("utr", "ticket_id", "order_id"):
             attribute_levels[attr] = EvidenceLevel.CORROBORATED.value
-        elif conf >= 0.7:
+        elif conf >= 0.5:
             attribute_levels[attr] = EvidenceLevel.EXTRACTED.value
         else:
             attribute_levels[attr] = EvidenceLevel.NOT_PRESENT.value
@@ -196,18 +205,39 @@ async def assess_trust(
         unresolved_checks.append("suspect_pattern")
 
     # ── Overall level ─────────────────────────────────────────────────────── #
+    # Only consider attributes that are actually present for this screenshot type
+    type_primary_attrs = {
+        "TICKET_QR":          {"ticket_id", "timestamp", "fare"},
+        "UPI_SUCCESS":        {"amount", "timestamp", "utr"},
+        "BANK_SMS":           {"amount", "timestamp", "utr"},
+        "UPI_FAILED_PENDING": {"amount", "timestamp"},
+        "REFUND_NOTICE":      {"amount", "timestamp"},
+        "BOT_ERROR":          {"timestamp"},
+        "CLAIM_SUBMISSION":   {"ticket_id", "amount"},
+    }
+    primary = type_primary_attrs.get(screenshot_type, set(attribute_levels.keys()))
     level_order = {
         EvidenceLevel.NOT_PRESENT.value: 0,
         EvidenceLevel.EXTRACTED.value: 1,
         EvidenceLevel.CORROBORATED.value: 2,
         EvidenceLevel.INDEPENDENTLY_VERIFIED.value: 3,
     }
-    relevant_levels = [v for v in attribute_levels.values() if v != EvidenceLevel.NOT_PRESENT.value]
+    # Only consider primary attributes that are present
+    relevant_levels = [
+        v for k, v in attribute_levels.items()
+        if k in primary and v != EvidenceLevel.NOT_PRESENT.value
+    ]
     if relevant_levels:
         overall_key = min(relevant_levels, key=lambda x: level_order.get(x, 0))
         overall_level = EvidenceLevel(overall_key)
     else:
-        overall_level = EvidenceLevel.NOT_PRESENT
+        # Fall back to all attributes if none of the primary ones are present
+        all_present = [v for v in attribute_levels.values() if v != EvidenceLevel.NOT_PRESENT.value]
+        if all_present:
+            overall_key = min(all_present, key=lambda x: level_order.get(x, 0))
+            overall_level = EvidenceLevel(overall_key)
+        else:
+            overall_level = EvidenceLevel.NOT_PRESENT
 
     # ── Verdict string (spec §6: never "fraud", never "verified") ─────────── #
     if screenshot_type == "SUSPECT_NOTICE":

@@ -312,8 +312,22 @@ def build_application() -> Application:
     return app
 
 
-async def run_bot() -> None:
-    await init_db()
+def run_bot_sync() -> None:
+    """
+    Synchronous entry point — called from main.py via a plain function call.
+    python-telegram-bot v20+ manages its own event loop internally;
+    we must NOT wrap run_polling() inside asyncio.run().
+    """
+    import asyncio as _asyncio
+    _asyncio.run(init_db())
     application = build_application()
     log.info("Starting Pratibimb Telegram bot…")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    # run_polling() blocks until the process is interrupted.
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+async def run_bot() -> None:
+    """Async shim kept for compatibility — delegates to sync runner."""
+    import asyncio as _asyncio
+    loop = _asyncio.get_event_loop()
+    await loop.run_in_executor(None, run_bot_sync)

@@ -22,12 +22,17 @@ CONFIDENCE_THRESHOLD = 0.50  # Below this → OTHER with low_confidence flag
 # Each entry: (ScreenshotType, [must_match patterns], [must_not patterns], weight)
 # Patterns are case-insensitive regex fragments applied to the raw OCR text.
 _RULES: list[tuple[ScreenshotType, list[str], list[str], float]] = [
-    # Ticket QR
+    # Ticket QR — any ONE of these strong signals is enough; QR presence is handled separately
     (
         ScreenshotType.TICKET_QR,
-        [r"(ticket|booking)\s*(id|no|#)", r"(qr|scan|valid)", r"(indiranagar|mg road|majestic|baiyappanahalli|namma metro|bmrcl)"],
+        [
+            r"(namma\s*metro|bmrcl|ಮೆಟ್ರೋ|metro)",
+            r"(passenger\s*count|ticket\s*(id|no|#)|booking\s*(id|ref)|qr_found=true)",
+            r"(indiranagar|mg\s*road|majestic|baiyappanahalli|whitefield|electronic\s*city|hebbal)",
+            r"\d{14,}T\d+",          # Namma Metro ticket ID pattern e.g. 19112026091424T0145398327
+        ],
         [r"payment\s+fail", r"pending", r"refund"],
-        0.85,
+        0.88,
     ),
     # UPI Success
     (
@@ -95,9 +100,10 @@ def _score_rules(text: str) -> list[tuple[ScreenshotType, float, str]]:
         matched = [p for p in must_match if re.search(p, t)]
         if not matched:
             continue
-        # Confidence scales with how many required patterns matched
+        # Confidence: base weight guaranteed on first match, scales up with more matches
+        # min_confidence = weight * 0.75 on 1 match, reaches weight on full coverage
         coverage = len(matched) / len(must_match) if must_match else 1.0
-        confidence = round(weight * (0.6 + 0.4 * coverage), 3)
+        confidence = round(weight * (0.75 + 0.25 * coverage), 3)
         results.append((stype, confidence, matched[0]))
     return sorted(results, key=lambda x: x[1], reverse=True)
 

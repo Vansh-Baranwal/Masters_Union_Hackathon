@@ -1,109 +1,161 @@
 """
 Sarvam AI API client for Pratibimb.
-Wraps Document AI (Extract + Digitise) and Sarvam-105B chat calls.
-All calls are async; job-based endpoints poll until completion or timeout.
 
-Verify model IDs and endpoint paths at https://docs.sarvam.ai before production use.
+Verified against sarvamai SDK v0.1.46 and live API (19-Nov-2026):
+  - Parse (OCR):   POST /doc-ai/v1/job/parse    → results at GET /doc-ai/v1/job/{id}/results
+  - Extract:       POST /doc-ai/v1/job/extract  → results at GET /doc-ai/v1/job/{id}/results
+  - Chat (LLM):    POST /v1/chat/completions
+  - Translate:     POST /translate
+
+All blocking SDK calls are wrapped in run_in_executor so they don't block the bot's event loop.
 """
 from __future__ import annotations
 
-import asyncio
-import base64
+import io
 import json
 import os
-from pathlib import Path
-from typing import Any, Optional
+import time
+from typing import Optional
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
-
 import structlog
 
 log = structlog.get_logger(__name__)
 
+SARVAM_API_KEY  = os.getenv("SARVAM_API_KEY", "")
 SARVAM_BASE_URL = os.getenv("SARVAM_BASE_URL", "https://api.sarvam.ai")
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
+POLL_INTERVAL   = 3     # seconds between status polls
+POLL_TIMEOUT    = 90    # max seconds to wait for a job
 
-# Polling config
-POLL_INTERVAL_SECONDS = 2.0
-POLL_MAX_ATTEMPTS = 30          # up to ~60 s before giving up
+TERMINAL_STATES = {"completed", "partially_completed", "failed", "rejected"}
 
 
 class SarvamError(Exception):
-    """Raised when a Sarvam API call fails irrecoverably."""
+    pass
 
+
+def _headers() -> dict:
+    return {"api-subscription-key": SARVAM_API_KEY}
+
+
+def _get_sdk_client():
+    try:
+        from sarvamai import SarvamAI
+    except ImportError:
+        raise SarvamError("sarvamai not installed: pip install sarvamai")
+    return SarvamAI(api_subscription_key=SARVAM_API_KEY)
+
+
+def _poll(client, job_id: str):
+    """Poll until terminal state; return final status object."""
+    deadline = time.monotonic() + POLL_TIMEOUT
+    while time.monotonic() < deadline:
+        st = client.doc_ai.get_status(job_id=job_id)
+        status = (st.status or "").lower()
+        log.debug("sarvam_poll", job_id=job_id, status=status)
+        if status in TERMINAL_STATES:
+            return st
+        time.sleep(POLL_INTERVAL)
+    raise SarvamError(f"Job {job_id} timed out after {POLL_TIMEOUT}s")
+
+
+def _fetch_results(job_id: str) -> dict:
+    """
+    Fetch job results via raw HTTP (bypasses SDK pydantic deserialization bug
+    with the 'digitise' type tag in SDK v0.1.46).
+    Endpoint: GET /doc-ai/v1/job/{job_id}/results
+    """
+    resp = httpx.get(
+        f"{SARVAM_BASE_URL}/doc-ai/v1/job/{job_id}/results",
+        headers=_headers(),
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise SarvamError(f"Results fetch failed {resp.status_code}: {resp.text[:200]}")
+    return resp.json()
+
+
+def _blocks_to_text(data: dict) -> str:
+    """Flatten all block texts from a results payload into a single string."""
+    lines = []
+    for doc in data.get("documents", []):
+        for page in doc.get("pages", []):
+            for block in page.get("blocks", []):
+                t = block.get("text", "").strip()
+                if t:
+                    lines.append(t)
+    return "\n".join(lines)
+
+
+def _results_to_fields(data: dict) -> dict:
+    """
+    For extract jobs, the result fields live in documents[].pages[].blocks[]
+    or in a top-level 'result' key depending on SDK version.
+    Try both shapes.
+    """
+    # Shape 1: top-level result dict
+    top = data.get("result")
+    if isinstance(top, dict) and top:
+        return top
+
+    # Shape 2: blocks with field_name / value pairs
+    fields: dict = {}
+    for doc in data.get("documents", []):
+        for page in doc.get("pages", []):
+            for block in page.get("blocks", []):
+                name = block.get("field_name") or block.get("key")
+                val  = block.get("value") or block.get("text")
+                if name and val is not None:
+                    fields[name] = val
+    return fields
+
+
+# ─────────────────────────────────────────────────────────────────────────── #
 
 class SarvamClient:
     """
-    Async Sarvam AI API client.
-
-    Usage:
-        async with SarvamClient() as client:
-            result = await client.extract(image_bytes, schema, screenshot_type)
+    Async-compatible Sarvam API client.
+    Blocking SDK calls run in a thread executor so they don't block asyncio.
+    Can be used with both `async with` and plain `with`.
     """
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        timeout: float = 60.0,
-    ) -> None:
+    def __init__(self, api_key: Optional[str] = None, **_):
         self._api_key = api_key or SARVAM_API_KEY
-        self._base_url = (base_url or SARVAM_BASE_URL).rstrip("/")
-        self._timeout = timeout
-        self._client: Optional[httpx.AsyncClient] = None
 
-    async def __aenter__(self) -> "SarvamClient":
-        self._client = httpx.AsyncClient(
-            base_url=self._base_url,
-            headers={
-                "api-subscription-key": self._api_key,
-                "Content-Type": "application/json",
-            },
-            timeout=self._timeout,
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_): pass
+
+    # ── Parse / digitise (full OCR) ──────────────────────────────────────── #
+
+    async def digitise(self, image_bytes: bytes) -> dict:
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._digitise_sync, image_bytes
         )
-        return self
 
-    async def __aexit__(self, *_: Any) -> None:
-        if self._client:
-            await self._client.aclose()
+    def _digitise_sync(self, image_bytes: bytes) -> dict:
+        t0 = time.monotonic()
+        client = _get_sdk_client()
+        try:
+            job = client.doc_ai.parse(
+                file=[("screenshot.jpg", io.BytesIO(image_bytes), "image/jpeg")],
+            )
+            st = _poll(client, job.job_id)
+            text = ""
+            if st.status.lower() in ("completed", "partially_completed"):
+                data = _fetch_results(job.job_id)
+                text = _blocks_to_text(data)
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            log.info("sarvam_digitise_done", job_id=job.job_id, chars=len(text), latency_ms=latency_ms)
+            return {"job_id": job.job_id, "text": text, "latency_ms": latency_ms}
+        except SarvamError:
+            raise
+        except Exception as exc:
+            raise SarvamError(f"Digitise failed: {exc}") from exc
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers                                                      #
-    # ------------------------------------------------------------------ #
-
-    def _encode_image(self, image_bytes: bytes) -> str:
-        return base64.b64encode(image_bytes).decode("utf-8")
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    async def _post(self, path: str, payload: dict) -> dict:
-        assert self._client, "Use SarvamClient as an async context manager."
-        resp = await self._client.post(path, json=payload)
-        if resp.status_code not in (200, 201, 202):
-            log.error("sarvam_api_error", path=path, status=resp.status_code, body=resp.text[:500])
-            raise SarvamError(f"Sarvam API {path} returned {resp.status_code}: {resp.text[:200]}")
-        return resp.json()
-
-    async def _poll_job(self, job_id: str) -> dict:
-        """Poll a Document AI job until it completes or we exhaust retries."""
-        for attempt in range(POLL_MAX_ATTEMPTS):
-            await asyncio.sleep(POLL_INTERVAL_SECONDS)
-            resp = await self._client.get(f"/v1/document-ai/jobs/{job_id}")
-            if resp.status_code != 200:
-                log.warning("sarvam_poll_non200", job_id=job_id, status=resp.status_code)
-                continue
-            data = resp.json()
-            status = data.get("status", "")
-            if status == "completed":
-                return data
-            if status in ("failed", "error"):
-                raise SarvamError(f"Sarvam job {job_id} failed: {data}")
-            log.debug("sarvam_job_pending", job_id=job_id, attempt=attempt, status=status)
-        raise SarvamError(f"Sarvam job {job_id} timed out after {POLL_MAX_ATTEMPTS} polls.")
-
-    # ------------------------------------------------------------------ #
-    # Public API                                                            #
-    # ------------------------------------------------------------------ #
+    # ── Extract (structured fields) ───────────────────────────────────────── #
 
     async def extract(
         self,
@@ -112,112 +164,70 @@ class SarvamClient:
         screenshot_type: str = "OTHER",
         language_hint: Optional[str] = None,
     ) -> dict:
-        """
-        Call Document AI Extract with a schema and return extracted fields.
-        Returns dict with keys: job_id, fields, raw_response, latency_ms
-        """
-        import time
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._extract_sync, image_bytes, schema, language_hint
+        )
+
+    def _extract_sync(self, image_bytes: bytes, schema: dict, language_hint: Optional[str]) -> dict:
         t0 = time.monotonic()
-
-        payload = {
-            "model": "sarvam-vision-1.5",
-            "mode": "extract",
-            "image": self._encode_image(image_bytes),
-            "schema": schema,
-            "metadata": {
-                "screenshot_type": screenshot_type,
-                **({"language_hint": language_hint} if language_hint else {}),
-            },
-        }
-
+        client = _get_sdk_client()
         try:
-            response = await self._post("/v1/document-ai/jobs", payload)
-            job_id = response.get("job_id") or response.get("id")
-
-            if job_id:
-                # Async job — poll for result
-                result = await self._poll_job(job_id)
-                fields = result.get("output", {}).get("fields", {})
-            else:
-                # Synchronous response (some endpoints return inline)
-                fields = response.get("fields", response.get("output", {}))
-                job_id = response.get("request_id", "sync")
-
+            job = client.doc_ai.extract(
+                file=[("screenshot.jpg", io.BytesIO(image_bytes), "image/jpeg")],
+                schema=json.dumps(schema),
+                language=language_hint or "en-IN",
+                output_format="json",
+            )
+            st = _poll(client, job.job_id)
+            fields: dict = {}
+            if st.status.lower() in ("completed", "partially_completed"):
+                data = _fetch_results(job.job_id)
+                fields = _results_to_fields(data)
             latency_ms = int((time.monotonic() - t0) * 1000)
-            log.info("sarvam_extract_done", job_id=job_id, latency_ms=latency_ms, type=screenshot_type)
-            return {"job_id": job_id, "fields": fields, "raw_response": response, "latency_ms": latency_ms}
-
+            log.info("sarvam_extract_done", job_id=job.job_id, latency_ms=latency_ms, nfields=len(fields))
+            return {"job_id": job.job_id, "fields": fields, "latency_ms": latency_ms}
         except SarvamError:
             raise
         except Exception as exc:
-            log.error("sarvam_extract_unexpected", error=str(exc))
             raise SarvamError(f"Extract failed: {exc}") from exc
 
-    async def digitise(self, image_bytes: bytes) -> dict:
-        """
-        Call Document AI Digitise for full OCR (raw text extraction).
-        Returns dict with keys: job_id, text, latency_ms
-        """
-        import time
-        t0 = time.monotonic()
-
-        payload = {
-            "model": "sarvam-vision-1.5",
-            "mode": "digitise",
-            "image": self._encode_image(image_bytes),
-        }
-
-        try:
-            response = await self._post("/v1/document-ai/jobs", payload)
-            job_id = response.get("job_id") or response.get("id")
-
-            if job_id:
-                result = await self._poll_job(job_id)
-                text = result.get("output", {}).get("text", "")
-            else:
-                text = response.get("text", response.get("output", ""))
-                job_id = response.get("request_id", "sync")
-
-            latency_ms = int((time.monotonic() - t0) * 1000)
-            log.info("sarvam_digitise_done", job_id=job_id, latency_ms=latency_ms, chars=len(text))
-            return {"job_id": job_id, "text": text, "latency_ms": latency_ms}
-
-        except SarvamError:
-            raise
-        except Exception as exc:
-            raise SarvamError(f"Digitise failed: {exc}") from exc
+    # ── LLM classification ────────────────────────────────────────────────── #
 
     async def classify_with_llm(self, raw_text: str, image_description: str = "") -> dict:
-        """
-        Use Sarvam-105B to classify an ambiguous screenshot.
-        Returns dict: screenshot_type, confidence (0-1), reason (one line)
-        """
-        from intake.models import ScreenshotType
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._classify_sync, raw_text
+        )
 
+    def _classify_sync(self, raw_text: str) -> dict:
+        from intake.models import ScreenshotType
         type_values = [t.value for t in ScreenshotType]
         system_prompt = (
             "You are a screenshot classifier for an Indian metro ticketing system. "
-            "Classify the screenshot into exactly one of these types: "
-            f"{', '.join(type_values)}. "
-            "Reply with JSON only: {\"screenshot_type\": \"...\", \"confidence\": 0.0, \"reason\": \"one line\"}. "
-            "Use OTHER when genuinely unsure. Never guess. Never use the words fraud or verified."
+            f"Classify into exactly one of: {', '.join(type_values)}. "
+            'Reply JSON only: {"screenshot_type":"...","confidence":0.0,"reason":"one line"}. '
+            "Use OTHER when unsure. Never say fraud or verified."
         )
-        user_message = f"Screenshot raw text:\n{raw_text}\n\nAdditional context: {image_description}"
-
-        payload = {
-            "model": "sarvam-105b",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 128,
-        }
-
         try:
-            response = await self._post("/v1/chat/completions", payload)
-            content = response["choices"][0]["message"]["content"].strip()
-            # Strip markdown fences if present
+            resp = httpx.post(
+                f"{SARVAM_BASE_URL}/v1/chat/completions",
+                headers={**_headers(), "Content-Type": "application/json"},
+                json={
+                    "model": "sarvam-m",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Screenshot text:\n{raw_text[:2000]}"},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 128,
+                },
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                log.warning("sarvam_llm_error", status=resp.status_code, body=resp.text[:200])
+                return {"screenshot_type": "OTHER", "confidence": 0.0, "reason": "llm_error"}
+            content = resp.json()["choices"][0]["message"]["content"].strip()
             if content.startswith("```"):
                 content = content.split("```")[1]
                 if content.startswith("json"):
@@ -230,28 +240,37 @@ class SarvamClient:
             }
         except Exception as exc:
             log.warning("sarvam_classify_failed", error=str(exc))
-            return {"screenshot_type": "OTHER", "confidence": 0.0, "reason": f"classification error: {exc}"}
+            return {"screenshot_type": "OTHER", "confidence": 0.0, "reason": str(exc)}
 
-    async def translate(self, text: str, target_language_code: str, source_language_code: str = "en") -> str:
-        """
-        Translate text using Sarvam Translate (Mayura).
-        target_language_code: BCP-47 codes like 'kn-IN', 'hi-IN', 'en-IN'
-        Returns translated string; falls back to original on error.
-        """
+    # ── Translation ───────────────────────────────────────────────────────── #
+
+    async def translate(self, text: str, target_language_code: str, source_language_code: str = "en-IN") -> str:
         if not text.strip():
             return text
-        payload = {
-            "input": text,
-            "source_language_code": source_language_code,
-            "target_language_code": target_language_code,
-            "speaker_gender": "Male",
-            "mode": "formal",
-            "model": "mayura:v1",
-            "enable_preprocessing": True,
-        }
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._translate_sync, text, source_language_code, target_language_code
+        )
+
+    def _translate_sync(self, text: str, source: str, target: str) -> str:
         try:
-            response = await self._post("/v1/translate", payload)
-            return response.get("translated_text", text)
-        except SarvamError:
-            log.warning("sarvam_translate_failed", target=target_language_code)
-            return text
+            resp = httpx.post(
+                f"{SARVAM_BASE_URL}/translate",
+                headers={**_headers(), "Content-Type": "application/json"},
+                json={
+                    "input": text,
+                    "source_language_code": source,
+                    "target_language_code": target,
+                    "speaker_gender": "Male",
+                    "mode": "formal",
+                    "model": "mayura:v1",
+                    "enable_preprocessing": True,
+                },
+                timeout=20,
+            )
+            if resp.status_code == 200:
+                return resp.json().get("translated_text", text)
+            log.warning("sarvam_translate_failed", status=resp.status_code)
+        except Exception as exc:
+            log.warning("sarvam_translate_error", error=str(exc))
+        return text

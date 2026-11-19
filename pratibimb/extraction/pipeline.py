@@ -116,6 +116,39 @@ async def run_extraction_pipeline(
     if qr_payload and not sarvam_fields.get("qr_payload"):
         sarvam_fields["qr_payload"] = qr_payload
 
+    # ── Step 6b: Fallback — parse OCR text into sarvam_fields when extract missed keys ── #
+    # This handles the case where Sarvam Extract returned empty fields but
+    # Digitise/Parse OCR text already has the values readable as plain text.
+    if raw_text:
+        from intake.normalisers import normalize_timestamp, normalize_utr, normalize_order_or_ticket_id
+        import re as _re
+
+        # Ticket ID: Namma Metro format NNNNNNNNNNNNNNTxxxxxxxxx or long alphanum
+        if not sarvam_fields.get("ticket_id"):
+            m = _re.search(r'\b(\d{14,}T\d+)\b', raw_text)
+            if m:
+                sarvam_fields["ticket_id"] = m.group(1)
+
+        # Timestamp
+        if not sarvam_fields.get("timestamp"):
+            m = _re.search(r'\b(\d{1,2}[-/]\d{1,2}[-/]\d{4}\s+\d{2}:\d{2}(?::\d{2})?)\b', raw_text)
+            if m:
+                ts = normalize_timestamp(m.group(1))
+                if ts:
+                    sarvam_fields["timestamp"] = ts
+
+        # Passenger count / fare-like number
+        if not sarvam_fields.get("fare") and not sarvam_fields.get("amount"):
+            m = _re.search(r'passenger\s*count\s*[:\-]?\s*(\d+)', raw_text, _re.IGNORECASE)
+            if m:
+                sarvam_fields["passenger_count"] = int(m.group(1))
+
+        # UTR (12 digits)
+        if not sarvam_fields.get("utr"):
+            m = _re.search(r'\b(\d{12})\b', raw_text)
+            if m:
+                sarvam_fields["utr"] = m.group(1)
+
     # ── Step 7: Build typed ExtractedFields ─────────────────────────────── #
     fields, field_confidence, field_sources, corrections = build_fields_from_sarvam(
         sarvam_fields,
