@@ -24,8 +24,46 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-API_BASE = "http://localhost:8000"
+API_BASE = st.secrets.get("api", {}).get("base_url", "http://localhost:8000")
 REFRESH_INTERVAL = 30   # seconds for auto-refresh on live pages
+
+# ─── Coordinator login gate ───────────────────────────────────────────────── #
+def _login_wall():
+    """Simple coordinator login — just an ID + trip ID pair. No password server needed."""
+    if st.session_state.get("logged_in"):
+        return True
+
+    st.markdown("## 🪞 Pratibimb")
+    st.markdown("#### Coordinator Login")
+    st.caption("Enter your coordinator ID and your trip ID to access your dashboard.")
+    st.divider()
+
+    with st.form("login"):
+        coord = st.text_input("Coordinator ID", placeholder="e.g. coord-vansh")
+        trip  = st.text_input("Trip ID", placeholder="Paste the trip ID you received when creating the trip")
+        submit = st.form_submit_button("Open dashboard", use_container_width=True, type="primary")
+
+    if submit:
+        if not coord.strip() or not trip.strip():
+            st.error("Both fields are required.")
+            return False
+        # Verify trip exists and belongs to this coordinator
+        resp = api("get", f"/trips/{trip.strip()}/summary")
+        if not resp:
+            return False
+        if resp.get("coordinator_id") != coord.strip():
+            st.error("Coordinator ID does not match this trip. Check both values and try again.")
+            return False
+        st.session_state["logged_in"]      = True
+        st.session_state["coordinator_id"] = coord.strip()
+        st.session_state["trip_id"]        = trip.strip()
+        st.session_state["trip_name"]      = resp.get("name", "")
+        st.rerun()
+
+    st.divider()
+    st.markdown("**New coordinator?** Create your trip first via the API or ask your admin.")
+    st.code("POST /trips  {name: '...', coordinator_id: '...'}", language="bash")
+    return False
 
 
 # ─── Page config (must be first Streamlit call) ───────────────────────────── #
@@ -115,32 +153,44 @@ with st.sidebar:
     st.caption("Coordinator Dashboard")
     st.divider()
 
-    # Trip selector
-    st.markdown("**Active Trip**")
-    trip_id_input = st.text_input(
-        "Trip ID", value=st.session_state.get("trip_id", ""),
-        placeholder="Paste trip ID here", label_visibility="collapsed"
-    )
-    if trip_id_input:
-        st.session_state["trip_id"] = trip_id_input.strip()
+    # Show logged-in coordinator
+    if st.session_state.get("logged_in"):
+        st.success(f"👤 {st.session_state.get('coordinator_id','')}")
+        st.caption(f"Trip: **{st.session_state.get('trip_name','')}**")
+        if st.button("🚪 Log out", use_container_width=True):
+            for k in ["logged_in","coordinator_id","trip_id","trip_name","trail_id"]:
+                st.session_state.pop(k, None)
+            st.rerun()
+        st.divider()
+    else:
+        # Trip selector for first-time / manual entry
+        st.markdown("**Active Trip**")
+        trip_id_input = st.text_input(
+            "Trip ID", value=st.session_state.get("trip_id", ""),
+            placeholder="Paste trip ID here", label_visibility="collapsed"
+        )
+        if trip_id_input:
+            st.session_state["trip_id"] = trip_id_input.strip()
 
-    # Quick create
+    # Quick create (always visible)
     with st.expander("➕ Create new trip"):
         with st.form("create_trip", clear_on_submit=True):
             trip_name = st.text_input("Trip name", placeholder="Namma Metro Offsite")
-            coord_id  = st.text_input("Your ID", placeholder="coord-vansh")
+            coord_id  = st.text_input("Your coordinator ID", placeholder="coord-vansh")
             if st.form_submit_button("Create", use_container_width=True):
                 if trip_name and coord_id:
                     r = api("post", "/trips", json={"name": trip_name, "coordinator_id": coord_id})
                     if r:
-                        st.session_state["trip_id"] = r["trip_id"]
+                        st.session_state["trip_id"]        = r["trip_id"]
+                        st.session_state["trip_name"]      = trip_name
+                        st.session_state["coordinator_id"] = coord_id
+                        st.session_state["logged_in"]      = True
                         st.success(f"Trip ID: `{r['trip_id'][:8]}…`")
                         st.info(f"Join code: **{r['join_code']}**")
                         st.rerun()
 
     st.divider()
 
-    # Page navigation
     page = st.radio(
         "Navigate",
         ["🏠 Overview", "👥 Roster", "📥 Inbox", "🔍 Trail", "✅ Decisions", "📤 Export", "🔒 Audit"],
@@ -148,7 +198,6 @@ with st.sidebar:
     )
 
     st.divider()
-    # API health indicator
     health = api("get", "/health")
     if health and health.get("status") == "ok":
         st.success("API ✅ online", icon="🟢")
@@ -156,7 +205,14 @@ with st.sidebar:
         st.error("API offline", icon="🔴")
 
 
+# ─── Login gate ───────────────────────────────────────────────────────────── #
+if not st.session_state.get("logged_in"):
+    if not _login_wall():
+        st.stop()   # don't render any page content until logged in
+
+
 tid = st.session_state.get("trip_id", "")
+coord_id_active = st.session_state.get("coordinator_id", "")
 
 
 # ─── Page: Overview ───────────────────────────────────────────────────────── #
@@ -445,7 +501,9 @@ def page_decisions():
     with st.form("decision_form", clear_on_submit=True):
         col1, col2 = st.columns(2)
         subject_ref = col1.text_input("Evidence ID *", placeholder="Full UUID from trail/inbox")
-        decided_by  = col2.text_input("Coordinator ID *", placeholder="Your ID")
+        decided_by  = col2.text_input("Coordinator ID *",
+                                       value=st.session_state.get("coordinator_id", ""),
+                                       placeholder="Your ID")
         action = st.selectbox("Action *", [
             "approved", "rejected", "proof_requested", "linked_manually"
         ], format_func=lambda x: {
